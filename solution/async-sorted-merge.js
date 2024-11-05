@@ -1,9 +1,9 @@
 "use strict";
 
 // So I implemented a Tournament Tree originally, but that did not work out well. You can check
-// the previous commits for the difference. There was some sort of bug in it, so hopefully
-// you're reading this one. I do think that the Tournament Tree was probably a better
-// solution for large number of log sources.
+// the previous commits for the difference. There was some sort of bug in it and I didn't realize
+// until after I submitted it, so hopefully you're reading this one. I do think that the Tournament 
+// Tree was probably a better solution for large number of log sources.
 
 /*
  * Assumptions Made:

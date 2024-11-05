@@ -139,6 +139,8 @@ class TournamentTree {
   }
 
   isEmpty() {
+    // If the root is null or the root's log is undefined, then the tree is empty. 
+    // The log check probably isn't necessary given the test setup
     return this.root === null || !this.root.log;
   }
 }

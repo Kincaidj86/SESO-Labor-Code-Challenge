@@ -1,128 +1,96 @@
 "use strict";
 
-// So I implemented a Tournament Tree originally, but that did not work out well. You can check
-// the previous commits for the difference. There was some sort of bug in it and I didn't realize
-// until after I submitted it, so hopefully you're reading this one. I do think that the Tournament 
-// Tree was probably a better solution for large number of log sources.
-
-/*
- * Assumptions Made:
- *   - Log sources are not being continuously hydrated so we can ditch references to source index
- *   - Logs contain valid data
- */
-
-class MinHeap {
-  constructor() {
-    this.heap = [];
+class TournamentTree {
+  
+  constructor(logSources, caches) {
+    this.logSources = logSources;
+    this.caches = caches;
+    this.tree = Array(2 * logSources.length - 1).fill(null); // Tree with leaves and intermediate nodes
+    this.MAX_CACHE_SIZE = 500;
   }
 
-  insert(logEntry) {
-    this.heap.push(logEntry);
-    this.bubbleUp();
-  }
+  async buildTree() {
 
-  bubbleUp() {
-    let index = this.heap.length - 1;
-    const element = this.heap[index];
+    // Load initial entries into caches
+    await Promise.all(
+      this.logSources.map((source, index) => loadCache(source, this.caches[index], this.MAX_CACHE_SIZE))
+    );
 
-    while (index > 0) {
-      let parentIndex = Math.floor((index - 1) / 2);
-      let parent = this.heap[parentIndex];
-
-      if (element.date >= parent.date) break;
-
-      this.heap[index] = parent;
-      index = parentIndex;
-    }
-    this.heap[index] = element;
-  }
-
-  extractMin() {
-    const min = this.heap[0];
-    const end = this.heap.pop();
-    if (this.heap.length > 0) {
-      this.heap[0] = end;
-      this.sinkDown();
-    }
-    return min;
-  }
-
-  /*
-    Compares the current element with its children and swaps it down until every parent node
-    is less than its children. 
-  */
-  sinkDown() {
-    let index = 0;
-    const length = this.heap.length;
-    const element = this.heap[0];
-
-    while (true) {
-      let leftChildIndex = 2 * index + 1;
-      let rightChildIndex = 2 * index + 2;
-      let swap = null;
-
-      if (leftChildIndex < length) {
-        let leftChild = this.heap[leftChildIndex];
-        if (leftChild.date < element.date) {
-          swap = leftChildIndex;
-        }
+    const leavesStart = this.logSources.length - 1;
+    for (let i = 0; i < this.logSources.length; i++) {
+      if (this.caches[i].length > 0) {
+        this.tree[leavesStart + i] = { ...this.caches[i].shift(), sourceIndex: i };
       }
-
-      if (rightChildIndex < length) {
-        let rightChild = this.heap[rightChildIndex];
-        if ((swap === null && rightChild.date < element.date) || 
-            (swap !== null && rightChild.date < this.heap[swap].date)) {
-          swap = rightChildIndex;
-        }
-      }
-
-      if (swap === null) break;
-
-      // Destructuring like this is a little weird, but still readable I think
-      [this.heap[index], this.heap[swap]] = [this.heap[swap], this.heap[index]];
-      index = swap;
     }
-    this.heap[index] = element;
+
+    // Build the tournament tree by sending winners up to the root
+    for (let i = leavesStart - 1; i >= 0; i--) {
+      // For each internal node, the children are at positions (2*i)+1 and (2*i)+2
+      this.tree[i] = this.getWinner(this.tree[2 * i + 1], this.tree[2 * i + 2]);
+    }
   }
 
-  size() {
-    return this.heap.length;
+  getWinner(left, right) {
+    if (!left) return right;
+    if (!right) return left;
+    return left.date <= right.date ? left : right;
+  }
+
+  // Minimum is always at root
+  getMin() {
+    return this.tree[0];
+  }
+
+  async replaceMin() {
+    const minEntry = this.getMin();
+    if (!minEntry) return;
+
+    const sourceIndex = minEntry.sourceIndex;
+
+    // Check if we need to refill the cache for this source
+    if (this.caches[sourceIndex].length < this.MAX_CACHE_SIZE / 2) {
+      loadCache(this.logSources[sourceIndex], this.caches[sourceIndex], this.MAX_CACHE_SIZE);
+    }
+
+    // Replace the minimum entry with the next entry from the same source cache
+    const nextEntry = this.caches[sourceIndex].shift() || null;
+    const leavesStart = this.logSources.length - 1;
+    this.tree[leavesStart + sourceIndex] = nextEntry
+      ? { ...nextEntry, sourceIndex }
+      : null;
+
+    // Update the tree from the leaf up to maintain tournament structure. Okay, this math still isn't the most pleasant.
+    for (let i = Math.floor((leavesStart + sourceIndex - 1) / 2); i >= 0; i = Math.floor((i - 1) / 2)) {
+      this.tree[i] = this.getWinner(this.tree[2 * i + 1], this.tree[2 * i + 2]);
+    }
+  }
+}
+
+async function loadCache(logSource, cache, maxSize) {
+  while (cache.length < maxSize) {
+    const log = await logSource.popAsync();
+    if (!log) break;
+    cache.push(log);
   }
 }
 
 module.exports = async function asyncSortedMerge(logSources, printer) {
-  const minHeap = new MinHeap();
-  const currentEntries = new Array(logSources.length); 
-  const entryToSourceIndex = new Map(); // Map to store entry to source index relationship
+  const caches = Array.from({ length: logSources.length }, () => []);
+  const tournamentTree = new TournamentTree(logSources, caches);
 
-  // Initialize the min-heap with the first entry of each log source
-  await Promise.all(logSources.map(async (source, index) => {
-    const entry = await source.popAsync();
-    currentEntries[index] = entry; // Store the initial entries
-    if (entry) {
-      minHeap.insert(entry);
-      entryToSourceIndex.set(entry, index); // Maintain a mapping for quick access
-    }
-  }));
+  // Build the initial tree with the first entries from each source
+  await tournamentTree.buildTree(); 
 
-  while (minHeap.size() > 0) {
-    const minEntry = minHeap.extractMin();
+  while (true) {
+    const minEntry = tournamentTree.getMin();
+        
+    // All sources are drained
+    if (!minEntry) break; 
+
     printer.print(minEntry);
-
-    // Get the source index directly from the map
-    const sourceIndex = entryToSourceIndex.get(minEntry);
-
-    // Get the next entry from the same source asynchronously
-    const nextEntry = await logSources[sourceIndex].popAsync();
-    currentEntries[sourceIndex] = nextEntry; // Update the current entry
-
-    // If there's a next entry, insert it into the min-heap and update the map
-    if (nextEntry) {
-      minHeap.insert(nextEntry);
-      entryToSourceIndex.set(nextEntry, sourceIndex); // Update the map with the new entry
-    } else {
-      entryToSourceIndex.delete(minEntry); // Remove the entry from the map if it's no longer valid
-    }
+    
+    // Rebalance the tree with the next entry from the source we just printed
+    await tournamentTree.replaceMin();
   }
 
   printer.done();
